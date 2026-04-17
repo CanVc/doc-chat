@@ -1,8 +1,8 @@
-# Architecture Document — DocChat
+# Architecture Document - DocChat
 
 **Status:** Draft  
 **Version:** 0.1  
-**Last updated:** 2026-04-16
+**Last updated:** 2026-04-17
 
 ---
 
@@ -10,22 +10,17 @@
 
 DocChat is a multi-container application orchestrated with Docker Compose. It consists of three services: a React frontend, a FastAPI backend, and a ChromaDB vector store. Configuration and uploaded files are persisted via Docker volumes.
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    Docker Network                    │
-│                                                      │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────┐ │
-│  │   Frontend   │   │   Backend    │   │ ChromaDB │ │
-│  │ React + Vite │──▶│   FastAPI    │──▶│          │ │
-│  │  Port 3000   │   │  Port 8000   │   │ Port 8001│ │
-│  └──────────────┘   └──────┬───────┘   └──────────┘ │
-│                            │                         │
-└────────────────────────────┼────────────────────────┘
-                             │
-                    ┌────────┴────────┐
-                    │  External APIs  │
-                    │ OpenAI / Ollama │
-                    └─────────────────┘
+```mermaid
+flowchart LR
+    subgraph DockerNetwork[Docker Network]
+        FE[Frontend\nReact + Vite\nPort 3000]
+        BE[Backend\nFastAPI\nPort 8000]
+        DB[ChromaDB\nPort 8001]
+        FE --> BE
+        BE --> DB
+    end
+
+    BE --> EXT[External APIs\nOpenAI / Ollama]
 ```
 
 ---
@@ -50,52 +45,52 @@ DocChat is a multi-container application orchestrated with Docker Compose. It co
 
 ## 3. Project Structure
 
-```
+```text
 docchat/
-├── docker-compose.yml
-├── .env.example                  # ports, volume paths only — no secrets
-│
-├── frontend/
-│   ├── Dockerfile
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── chat/
-│   │   │   ├── sources/
-│   │   │   ├── projects/
-│   │   │   └── settings/
-│   │   ├── pages/
-│   │   │   ├── ChatPage.tsx
-│   │   │   ├── ProjectPage.tsx
-│   │   │   └── SettingsPage.tsx
-│   │   ├── hooks/
-│   │   ├── lib/
-│   │   └── main.tsx
-│   └── package.json
-│
-└── backend/
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── main.py                   # FastAPI app entrypoint
-    ├── config.py                 # settings.json read/write
-    ├── api/
-    │   ├── projects.py           # CRUD projects
-    │   ├── sources.py            # ingestion, list, delete
-    │   ├── chat.py               # RAG + streaming
-    │   └── settings.py           # provider config, model selection
-    ├── services/
-    │   ├── ingestion.py          # orchestrates parsing → chunking → embedding → store
-    │   ├── retrieval.py          # vector search
-    │   ├── llm.py                # LLM provider abstraction (OpenAI / Ollama)
-    │   ├── embeddings.py         # embedding provider abstraction
-    │   └── parsers/
-    │       ├── pdf.py
-    │       ├── docx.py
-    │       ├── text.py
-    │       ├── csv.py
-    │       └── url.py
-    └── data/
-        ├── settings.json         # persisted via Docker volume
-        └── uploads/              # persisted via Docker volume
+  docker-compose.yml
+  .env.example                  # ports, volume paths only - no secrets
+
+  frontend/
+    Dockerfile
+    src/
+      components/
+        chat/
+        sources/
+        projects/
+        settings/
+      pages/
+        ChatPage.tsx
+        ProjectPage.tsx
+        SettingsPage.tsx
+      hooks/
+      lib/
+      main.tsx
+    package.json
+
+  backend/
+    Dockerfile
+    requirements.txt
+    main.py                     # FastAPI app entrypoint
+    config.py                   # settings.json read/write
+    api/
+      projects.py               # CRUD projects
+      sources.py                # ingestion, list, delete
+      chat.py                   # RAG + streaming
+      settings.py               # provider config, model selection
+    services/
+      ingestion.py              # parsing -> chunking -> embedding -> store
+      retrieval.py              # vector search
+      llm.py                    # LLM provider abstraction (OpenAI / Ollama)
+      embeddings.py             # embedding provider abstraction
+      parsers/
+        pdf.py
+        docx.py
+        text.py
+        csv.py
+        url.py
+    data/
+      settings.json             # persisted via Docker volume
+      uploads/                  # persisted via Docker volume
 ```
 
 ---
@@ -108,14 +103,13 @@ docchat/
 {
   "provider": "openai",
   "openai_api_key": "sk-proj-ABC...XYZ",
-  "openai_api_key_display": "sk-proj-ABC...XYZ",
   "ollama_url": null,
   "chat_model": "gpt-4o-mini",
   "embedding_model": "text-embedding-3-small"
 }
 ```
 
-> The API key is stored as-is server-side. Only the masked version (`sk-proj-ABC...XYZ`) is ever sent to the frontend.
+> `openai_api_key_display` is generated by the API response and is not persisted in `settings.json`.
 
 ### 4.2 Project
 
@@ -175,13 +169,40 @@ Stored as ChromaDB collection metadata + a lightweight JSON index.
 | Method | Route | Description |
 |---|---|---|
 | GET | `/api/projects/{id}/sources` | List sources for a project |
-| POST | `/api/projects/{id}/sources` | Upload file or submit URL |
+| POST | `/api/projects/{id}/sources` | Create ingestion job (file upload or URL) |
+| GET | `/api/projects/{id}/sources/jobs/{job_id}/events` | Stream ingestion progress events (SSE) |
 | DELETE | `/api/projects/{id}/sources/{source_id}` | Delete a source |
 
 ### Chat
 | Method | Route | Description |
 |---|---|---|
 | POST | `/api/chat` | Send a message, returns SSE stream |
+
+### Chat SSE Contract (`POST /api/chat`)
+
+The chat endpoint streams responses using Server-Sent Events with `Content-Type: text/event-stream`.
+
+Event types and payloads:
+
+- `event: start`
+  - `{ "provider": "openai|ollama", "model": "...", "context_truncated": true|false }`
+- `event: token`
+  - `{ "delta": "partial generated text" }`
+- `event: citation`
+  - `{ "source_id": "uuid", "source_name": "...", "chunk_id": "uuid", "page": 3, "excerpt": "...", "score": 0.87 }`
+- `event: usage`
+  - `{ "prompt_tokens": 123, "completion_tokens": 456, "total_tokens": 579, "estimated_cost_usd": 0.0012 }`
+  - If unavailable for a request, `estimated_cost_usd` is `null`.
+- `event: error`
+  - `{ "code": "provider_error|timeout|rate_limited|validation_error", "message": "...", "retryable": true|false }`
+- `event: done`
+  - `{ "finish_reason": "stop|length|error", "latency_ms": 1234 }`
+
+Expected order:
+
+- Normal flow: `start` -> `token*` -> `citation*` -> `usage?` -> `done`
+- Streaming failure: `start` -> `token*` -> `error` (connection closes)
+- Request validation failure: regular HTTP `4xx` JSON response (no SSE stream starts)
 
 ### Settings
 | Method | Route | Description |
@@ -198,62 +219,23 @@ Stored as ChromaDB collection metadata + a lightweight JSON index.
 
 ### 6.1 Ingestion Pipeline
 
-```
-Upload (file or URL)
-       │
-       ▼
-Compute content hash
-       │
-       ├─ Hash already in project? → Return { action: "replace_available" }
-       │
-       ▼
-Parse text content
-(pdfplumber / python-docx / plain text / httpx for URL)
-       │
-       ▼
-Split into chunks
-(recursive strategy, ~500 tokens, 50-token overlap)
-       │
-       ▼
-Generate embeddings
-(OpenAI API or Ollama — via embeddings.py abstraction)
-       │
-       ▼
-Store in ChromaDB
-(collection = project_id, metadata per chunk)
-       │
-       ▼
-Save source record to project index
-       │
-       ▼
-Return { chunk_count, source_name }
-```
+1. User submits a file or URL to `POST /api/projects/{id}/sources`.
+2. Backend validates input, creates an ingestion job, and returns `{ "job_id": "...", "status": "queued" }`.
+3. Frontend subscribes to `GET /api/projects/{id}/sources/jobs/{job_id}/events` (SSE).
+4. Backend computes `content_hash` and checks duplicates within the project.
+5. If duplicate is found, backend emits `replace_available` and marks job as completed without re-indexing.
+6. If not duplicate, backend parses content, chunks text, generates embeddings, stores vectors in ChromaDB, and saves source metadata.
+7. Backend emits progress events throughout the job (for example: `queued`, `parsing`, `chunking`, `embedding`, `storing`, `completed`, `failed`).
+8. On completion, backend emits a final payload such as `{ "status": "completed", "chunk_count": 42, "source_name": "onboarding_2024.pdf" }`.
 
 ### 6.2 RAG Query Pipeline
 
-```
-User message
-       │
-       ▼
-Embed the question
-(same provider as ingestion)
-       │
-       ▼
-Vector search in ChromaDB
-(collection = project_id, top-k = 5)
-       │
-       ▼
-Build prompt
-(system prompt + retrieved chunks + conversation history)
-       │
-       ▼
-Call LLM (streaming)
-(OpenAI or Ollama — via llm.py abstraction)
-       │
-       ▼
-Stream response via SSE
-(token by token to frontend)
-```
+1. Frontend sends user message and conversation history.
+2. Backend embeds the question using the configured embedding provider.
+3. Backend performs vector search in ChromaDB (`collection = project_id`, `top_k = 5`).
+4. Backend builds the prompt from system instructions, retrieved chunks, and conversation window.
+5. Backend calls the selected LLM provider (OpenAI or Ollama) in streaming mode.
+6. Backend streams generated tokens to the frontend via SSE.
 
 ### 6.3 Conversation Context Management
 
@@ -262,6 +244,14 @@ Stream response via SSE
 - Backend applies a sliding window: if total tokens (history + chunks + question) exceed the model's context limit, oldest messages are dropped
 - When messages are dropped, the backend includes a flag in the response: `context_truncated: true`
 - Frontend displays a subtle notice when this flag is received
+
+### 6.4 Ingestion Limits
+
+- Maximum uploaded file size: `50 MB` per file
+- Maximum fetched page size for URL ingestion: `50 MB`
+- URL ingestion timeout: `30 seconds`
+- Maximum redirects for URL ingestion: `5`
+- Accepted URL schemes: `http` and `https`
 
 ---
 
@@ -305,14 +295,21 @@ services:
     volumes:
       - docchat_data:/app/data
     depends_on:
-      - chromadb
+      chromadb:
+        condition: service_healthy
 
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.5
     ports:
       - "8001:8001"
     volumes:
       - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/heartbeat')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   docchat_data:    # settings.json + uploaded files
@@ -323,16 +320,36 @@ volumes:
 
 ---
 
-## 9. Key Design Decisions
+## 9. Security & Trust Boundaries
+
+### 9.1 Trust Boundaries
+
+- `Client -> Backend API`: browser inputs are untrusted and validated server-side
+- `Backend API -> Local Storage`: only backend services can read/write `data/` and update ChromaDB
+- `Backend API -> External Providers`: OpenAI/Ollama calls are treated as external dependencies and handled with explicit timeouts/errors
+- `Backend API -> URL Sources`: remote web content is untrusted and processed through constrained ingestion rules
+
+### 9.2 Security Rules (v1)
+
+- No built-in authentication in v1; deployment is protected at network level
+- CORS uses an explicit frontend-origin allowlist (no wildcard `*`)
+- File ingestion validates extension + MIME type + file signature before parsing
+- Uploaded paths are backend-generated (UUID-based); user-provided filenames are never used as filesystem paths
+- Path traversal protection is enforced by resolving paths and verifying they stay under `data/uploads/`
+- API key is never returned in clear text; settings responses expose only a masked representation
+
+---
+
+## 10. Key Design Decisions
 
 | Decision | Choice | Reason |
 |---|---|---|
-| One ChromaDB collection per project | ✅ | Clean isolation, simple to delete, no cross-project bleed |
-| Config stored as JSON | ✅ | Zero dependency, sufficient for a single-node deployment |
-| Files kept after ingestion | ✅ | Allows re-ingestion if embedding model changes |
-| History managed client-side | ✅ | No persistence requirement, simplifies backend |
-| Sliding window for context | ✅ | Simple, predictable, honest to the user |
-| Provider abstraction layer | ✅ | OpenAI and Ollama swappable without touching RAG logic |
+| One ChromaDB collection per project | Adopted | Clean isolation, simple to delete, no cross-project bleed |
+| Config stored as JSON | Adopted | Zero dependency, sufficient for a single-node deployment |
+| Files kept after ingestion | Adopted | Allows re-ingestion if embedding model changes |
+| History managed client-side | Adopted | No persistence requirement, simplifies backend |
+| Sliding window for context | Adopted | Simple, predictable, honest to the user |
+| Provider abstraction layer | Adopted | OpenAI and Ollama swappable without touching RAG logic |
 
 ---
 
