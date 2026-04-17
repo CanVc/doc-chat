@@ -14,6 +14,9 @@ Establish a reproducible local environment for development and deployment with D
 **Done when:**
 - A developer can clone the repository and run `docker compose up` on a fresh machine.
 - The stack boots with three services: frontend, backend, and ChromaDB.
+- Developer workstation prerequisites are documented and validated (`Docker` + Compose v2, `Python 3.11`, `venv`, and `Node.js`/`npm`).
+- Backend local development setup is documented with `python -m venv` creation and dependency installation steps.
+- Frontend local development setup is documented with Node package installation and dev run commands.
 - `.env` is limited to infrastructure settings (ports/paths) and contains no API secrets.
 
 ---
